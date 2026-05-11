@@ -386,10 +386,8 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
             .document(app_name)
             .collection("users")
         )
-        user_docs = await asyncio.gather(
-            *[users_coll.document(uid).get() for uid in unique_user_ids]
-        )
-        for u_doc in user_docs:
+        refs = [users_coll.document(uid) for uid in sorted(unique_user_ids)]
+        async for u_doc in self.client.get_all(refs):
           if u_doc.exists:
             user_states_map[u_doc.id] = u_doc.to_dict()
 

@@ -482,7 +482,11 @@ async def test_list_sessions_without_user_id(mock_firestore_client):
   user_app_doc.collection.return_value = users_coll
   user_doc_ref = mock.MagicMock()
   users_coll.document.return_value = user_doc_ref
-  user_doc_ref.get = mock.AsyncMock(return_value=user_doc)
+
+  async def mock_get_all(refs):
+    yield user_doc
+
+  mock_firestore_client.get_all = mock_get_all
 
   response = await service.list_sessions(app_name=app_name)
 
@@ -544,7 +548,11 @@ async def test_list_sessions_filters_other_apps(mock_firestore_client):
   user_app_doc.collection.return_value = users_coll
   user_doc_ref = mock.MagicMock()
   users_coll.document.return_value = user_doc_ref
-  user_doc_ref.get = mock.AsyncMock(return_value=user_doc)
+
+  async def mock_get_all(refs):
+    yield user_doc
+
+  mock_firestore_client.get_all = mock_get_all
 
   response = await service.list_sessions(app_name=app_name)
 
