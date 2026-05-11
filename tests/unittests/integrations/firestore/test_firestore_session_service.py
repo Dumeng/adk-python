@@ -494,12 +494,15 @@ async def test_list_sessions_without_user_id(mock_firestore_client):
 
   user_doc = mock.MagicMock()
   user_doc.id = "user1"
+  user_doc.exists = True
   user_doc.to_dict.return_value = {"user_key": "user_val"}
   user_app_doc = mock.MagicMock()
   user_state_coll.document.return_value = user_app_doc
   users_coll = mock.MagicMock()
   user_app_doc.collection.return_value = users_coll
-  users_coll.get = mock.AsyncMock(return_value=[user_doc])
+  user_doc_ref = mock.MagicMock()
+  users_coll.document.return_value = user_doc_ref
+  user_doc_ref.get = mock.AsyncMock(return_value=user_doc)
 
   response = await service.list_sessions(app_name=app_name)
 
@@ -553,12 +556,15 @@ async def test_list_sessions_filters_other_apps(mock_firestore_client):
 
   user_doc = mock.MagicMock()
   user_doc.id = "user1"
+  user_doc.exists = True
   user_doc.to_dict.return_value = {"user_key": "user_val"}
   user_app_doc = mock.MagicMock()
   user_state_coll.document.return_value = user_app_doc
   users_coll = mock.MagicMock()
   user_app_doc.collection.return_value = users_coll
-  users_coll.get = mock.AsyncMock(return_value=[user_doc])
+  user_doc_ref = mock.MagicMock()
+  users_coll.document.return_value = user_doc_ref
+  user_doc_ref.get = mock.AsyncMock(return_value=user_doc)
 
   response = await service.list_sessions(app_name=app_name)
 
