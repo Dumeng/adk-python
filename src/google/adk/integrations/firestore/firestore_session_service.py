@@ -204,7 +204,7 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
         "state": session_state,
         "createTime": now,
         "updateTime": now,
-        "revision": 1,
+        "revision": 0,
     }
 
     @firestore.async_transactional  # type: ignore[untyped-decorator]
