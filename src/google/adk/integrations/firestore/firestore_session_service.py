@@ -548,9 +548,6 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
           current_user.update(user_updates)
           transaction.set(user_ref, current_user, merge=True)
 
-        for k, v in session_updates.items():
-          session.state[k] = v
-
         new_revision = current_revision + 1
         session_only_state = {
             k: v
@@ -558,6 +555,8 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
             if not k.startswith(State.APP_PREFIX)
             and not k.startswith(State.USER_PREFIX)
         }
+        for k, v in session_updates.items():
+          session_only_state[k] = v
         transaction.update(
             session_ref,
             {
