@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from datetime import datetime
 from datetime import timezone
 import logging
@@ -22,22 +23,26 @@ import os
 from typing import Any
 from typing import cast
 from typing import Optional
-from typing import TYPE_CHECKING
 
-_SessionLockKey = tuple[str, str, str]
-
-if TYPE_CHECKING:
-  from google.cloud import firestore
-
-from pydantic import BaseModel
-
+from ...errors.already_exists_error import AlreadyExistsError
 from ...events.event import Event
+from ...platform import uuid as platform_uuid
 from ...sessions import _session_util
 from ...sessions.base_session_service import BaseSessionService
 from ...sessions.base_session_service import GetSessionConfig
 from ...sessions.base_session_service import ListSessionsResponse
 from ...sessions.session import Session
 from ...sessions.state import State
+
+try:
+  from google.cloud import firestore
+except ImportError as e:
+  raise ImportError(
+      "FirestoreSessionService requires google-cloud-firestore. "
+      "Install it with: pip install google-cloud-firestore"
+  ) from e
+
+_SessionLockKey = tuple[str, str, str]
 
 logger = logging.getLogger("google_adk." + __name__)
 
@@ -118,14 +123,6 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
       root_collection: The root collection name. Defaults to 'adk-session' or
         the value of ADK_FIRESTORE_ROOT_COLLECTION env var.
     """
-    try:
-      from google.cloud import firestore
-    except ImportError as e:
-      raise ImportError(
-          "FirestoreSessionService requires google-cloud-firestore. "
-          "Install it with: pip install google-cloud-firestore"
-      ) from e
-
     self.client = client or firestore.AsyncClient()
     self.root_collection = (
         root_collection
@@ -155,8 +152,6 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
       session_state: dict[str, Any],
   ) -> dict[str, Any]:
     """Merge app, user, and session states into a single state dictionary."""
-    import copy
-
     merged_state = copy.deepcopy(session_state)
     for key, value in app_state.items():
       merged_state[State.APP_PREFIX + key] = value
@@ -184,11 +179,7 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
       session_id: Optional[str] = None,
   ) -> Session:
     """Creates a new session in Firestore."""
-    from google.cloud import firestore
-
     if not session_id:
-      from ...platform import uuid as platform_uuid
-
       session_id = platform_uuid.new_uuid()
 
     initial_state = state or {}
@@ -229,8 +220,6 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
       # 1. Reads
       snap = await session_ref.get(transaction=transaction)
       if snap.exists:
-        from ...errors.already_exists_error import AlreadyExistsError
-
         raise AlreadyExistsError(f"Session {session_id} already exists.")
 
       app_snap = await app_ref.get(transaction=transaction)
@@ -434,8 +423,6 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
       self, *, app_name: str, user_id: str, session_id: str
   ) -> None:
     """Deletes a session and its events from Firestore."""
-    from google.cloud import firestore
-
     session_ref = self._get_sessions_ref(app_name, user_id).document(session_id)
 
     @firestore.async_transactional  # type: ignore[untyped-decorator]
@@ -470,8 +457,6 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
 
   async def append_event(self, session: Session, event: Event) -> Event:
     """Appends an event to a session in Firestore."""
-    from google.cloud import firestore
-
     if event.partial:
       return event
 

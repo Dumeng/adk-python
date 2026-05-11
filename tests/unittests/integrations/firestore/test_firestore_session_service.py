@@ -16,8 +16,13 @@ from __future__ import annotations
 
 from unittest import mock
 
+from google.adk.errors.already_exists_error import AlreadyExistsError
 from google.adk.events.event import Event
+from google.adk.events.event import EventActions
 from google.adk.integrations.firestore.firestore_session_service import FirestoreSessionService
+from google.adk.sessions.base_session_service import GetSessionConfig
+from google.adk.sessions.session import Session
+from google.cloud import firestore
 import pytest
 
 
@@ -68,21 +73,6 @@ def mock_firestore_client():
   return client
 
 
-def test_init_missing_dependency():
-  import builtins
-
-  original_import = builtins.__import__
-
-  def mock_import(name, globals=None, locals=None, fromlist=(), level=0):
-    if name == "google.cloud" and "firestore" in fromlist:
-      raise ImportError("Mocked import error")
-    return original_import(name, globals, locals, fromlist, level)
-
-  with mock.patch("builtins.__import__", side_effect=mock_import):
-    with pytest.raises(ImportError, match="requires google-cloud-firestore"):
-      FirestoreSessionService()
-
-
 @pytest.mark.asyncio
 async def test_create_session(mock_firestore_client):
 
@@ -107,8 +97,6 @@ async def test_create_session(mock_firestore_client):
   user_ref = users_coll.document.return_value
   sessions_ref = user_ref.collection.return_value
   session_doc_ref = sessions_ref.document.return_value
-
-  from google.cloud import firestore
 
   transaction = mock_firestore_client.transaction.return_value
   transaction.set.assert_called_once()
@@ -247,7 +235,6 @@ async def test_append_event(mock_firestore_client):
   service = FirestoreSessionService(client=mock_firestore_client)
   app_name = "test_app"
   user_id = "test_user"
-  from google.adk.sessions.session import Session
 
   session = Session(id="test_session", app_name=app_name, user_id=user_id)
   event = Event(invocation_id="test_inv", author="user")
@@ -267,8 +254,6 @@ async def test_append_event(mock_firestore_client):
   with mock.patch("google.cloud.firestore.async_transactional", lambda x: x):
     await service.append_event(session, event)
 
-  from google.cloud import firestore
-
   transaction = mock_firestore_client.transaction.return_value
   transaction.set.assert_called()  # Invoked for events appends
   transaction.update.assert_called_once()  # Invoked for session revisions
@@ -283,7 +268,6 @@ async def test_append_event_with_state_delta(mock_firestore_client):
   service = FirestoreSessionService(client=mock_firestore_client)
   app_name = "test_app"
   user_id = "test_user"
-  from google.adk.sessions.session import Session
 
   session = Session(id="test_session", app_name=app_name, user_id=user_id)
 
@@ -320,8 +304,6 @@ async def test_append_event_with_state_delta(mock_firestore_client):
 
   assert session.state["session_key"] == "session_val"
 
-  from google.cloud import firestore
-
   transaction.update.assert_called_once()
   args, kwargs = transaction.update.call_args
   # In modular Firestore configurations alignments, updating variables mock assertions core setups
@@ -334,9 +316,6 @@ async def test_append_event_with_temp_state(mock_firestore_client):
   service = FirestoreSessionService(client=mock_firestore_client)
   app_name = "test_app"
   user_id = "test_user"
-  from google.adk.events.event import Event
-  from google.adk.events.event import EventActions
-  from google.adk.sessions.session import Session
 
   session = Session(id="test_session", app_name=app_name, user_id=user_id)
 
@@ -589,8 +568,6 @@ async def test_create_session_already_exists(mock_firestore_client):
   )
   doc_snapshot.exists = True
 
-  from google.adk.errors.already_exists_error import AlreadyExistsError
-
   with mock.patch("google.cloud.firestore.async_transactional", lambda x: x):
     with pytest.raises(AlreadyExistsError):
       await service.create_session(
@@ -618,8 +595,6 @@ async def test_get_session_with_config(mock_firestore_client):
   events_collection_ref = (
       mock_firestore_client.collection.return_value.document.return_value.collection.return_value.document.return_value.collection.return_value.document.return_value.collection.return_value
   )
-
-  from google.adk.sessions.base_session_service import GetSessionConfig
 
   config = GetSessionConfig(after_timestamp=1234567890.0, num_recent_events=5)
 
@@ -663,7 +638,6 @@ async def test_delete_session_batching(mock_firestore_client):
 @pytest.mark.asyncio
 async def test_append_event_partial(mock_firestore_client):
   service = FirestoreSessionService(client=mock_firestore_client)
-  from google.adk.sessions.session import Session
 
   session = Session(id="test_session", app_name="test_app", user_id="test_user")
 
