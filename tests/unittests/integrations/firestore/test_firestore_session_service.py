@@ -261,6 +261,7 @@ async def test_append_event(mock_firestore_client):
   args, kwargs = transaction.update.call_args
   assert args[1]["revision"] == 1
   assert args[1]["updateTime"] == firestore.SERVER_TIMESTAMP
+  assert session.last_update_time == event.timestamp
 
 
 @pytest.mark.asyncio

@@ -15,12 +15,14 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import copy
 from datetime import datetime
 from datetime import timezone
 import logging
 import os
 from typing import Any
+from typing import AsyncGenerator
 from typing import cast
 from typing import Optional
 
@@ -46,45 +48,16 @@ _SessionLockKey = tuple[str, str, str]
 
 logger = logging.getLogger("google_adk." + __name__)
 
+_STALE_SESSION_ERROR_MESSAGE = (
+    "The session has been modified in storage since it was loaded. "
+    "Please reload the session before appending more events."
+)
+
 DEFAULT_ROOT_COLLECTION = "adk-session"
 DEFAULT_SESSIONS_COLLECTION = "sessions"
 DEFAULT_EVENTS_COLLECTION = "events"
 DEFAULT_APP_STATE_COLLECTION = "app_states"
 DEFAULT_USER_STATE_COLLECTION = "user_states"
-
-
-class _SessionLockContext:
-  """Async context manager for serializing event appends for the same session."""
-
-  def __init__(
-      self, service: FirestoreSessionService, lock_key: _SessionLockKey
-  ):
-    self.service = service
-    self.lock_key = lock_key
-    self.lock: Optional[asyncio.Lock] = None
-
-  async def __aenter__(self) -> None:
-    async with self.service._session_locks_guard:
-      lock = self.service._session_locks.get(self.lock_key, asyncio.Lock())
-      self.service._session_locks[self.lock_key] = lock
-      self.service._session_lock_ref_count[self.lock_key] = (
-          self.service._session_lock_ref_count.get(self.lock_key, 0) + 1
-      )
-      self.lock = lock
-    await self.lock.acquire()
-
-  async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-    if self.lock:
-      self.lock.release()
-      async with self.service._session_locks_guard:
-        remaining = (
-            self.service._session_lock_ref_count.get(self.lock_key, 0) - 1
-        )
-        if remaining <= 0 and not self.lock.locked():
-          self.service._session_lock_ref_count.pop(self.lock_key, None)
-          self.service._session_locks.pop(self.lock_key, None)
-        else:
-          self.service._session_lock_ref_count[self.lock_key] = remaining
 
 
 class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
@@ -139,11 +112,32 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
     self.app_state_collection = DEFAULT_APP_STATE_COLLECTION
     self.user_state_collection = DEFAULT_USER_STATE_COLLECTION
 
-  def _with_session_lock(
+  @asynccontextmanager
+  async def _with_session_lock(
       self, *, app_name: str, user_id: str, session_id: str
-  ) -> _SessionLockContext:
+  ) -> AsyncGenerator[None]:
     """Serializes event appends for the same session within this process."""
-    return _SessionLockContext(self, (app_name, user_id, session_id))
+    lock_key = (app_name, user_id, session_id)
+    async with self._session_locks_guard:
+      lock = self._session_locks.get(lock_key)
+      if lock is None:
+        lock = asyncio.Lock()
+        self._session_locks[lock_key] = lock
+      self._session_lock_ref_count[lock_key] = (
+          self._session_lock_ref_count.get(lock_key, 0) + 1
+      )
+
+    try:
+      async with lock:
+        yield
+    finally:
+      async with self._session_locks_guard:
+        remaining = self._session_lock_ref_count.get(lock_key, 0) - 1
+        if remaining <= 0 and not lock.locked():
+          self._session_lock_ref_count.pop(lock_key, None)
+          self._session_locks.pop(lock_key, None)
+        else:
+          self._session_lock_ref_count[lock_key] = remaining
 
   @staticmethod
   def _merge_state(
@@ -508,10 +502,7 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
 
         if session._storage_update_marker is not None:
           if session._storage_update_marker != str(current_revision):
-            raise ValueError(
-                "The session has been modified in storage since it was loaded. "
-                "Please reload the session before appending more events."
-            )
+            raise ValueError(_STALE_SESSION_ERROR_MESSAGE)
 
         app_snap = (
             await app_ref.get(transaction=transaction) if app_updates else None
@@ -534,18 +525,12 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
           transaction.set(user_ref, current_user, merge=True)
 
         new_revision = current_revision + 1
-        session_only_state = {
-            k: v
-            for k, v in session.state.items()
-            if not k.startswith(State.APP_PREFIX)
-            and not k.startswith(State.USER_PREFIX)
-        }
-        for k, v in session_updates.items():
-          session_only_state[k] = v
+        current_session_state = session_doc.get("state", {})
+        current_session_state.update(session_updates)
         transaction.update(
             session_ref,
             {
-                "state": session_only_state,
+                "state": current_session_state,
                 "updateTime": firestore.SERVER_TIMESTAMP,
                 "revision": new_revision,
             },
@@ -571,6 +556,7 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
       transaction_obj = self.client.transaction()
       new_revision_count = await _append_txn(transaction_obj)
       session._storage_update_marker = str(new_revision_count)
+      session.last_update_time = event.timestamp
 
     await super().append_event(session, event)
     return event
