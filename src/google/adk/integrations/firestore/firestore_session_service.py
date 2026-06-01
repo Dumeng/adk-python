@@ -255,7 +255,7 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
         events=[],
         last_update_time=local_now,
     )
-    session._storage_update_marker = "1"
+    session._storage_update_marker = "0"
     return session
 
   async def get_session(
