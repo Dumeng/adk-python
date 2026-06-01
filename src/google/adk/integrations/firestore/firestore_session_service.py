@@ -523,12 +523,18 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
           transaction.set(user_ref, current_user, merge=True)
 
         new_revision = current_revision + 1
-        current_session_state = session_doc.get("state", {})
-        current_session_state.update(session_updates)
+
+        session_only_state = {
+            k: v
+            for k, v in session.state.items()
+            if not k.startswith(State.APP_PREFIX)
+            and not k.startswith(State.USER_PREFIX)
+            and not k.startswith(State.TEMP_PREFIX)
+        }
         transaction.update(
             session_ref,
             {
-                "state": current_session_state,
+                "state": session_only_state,
                 "updateTime": firestore.SERVER_TIMESTAMP,
                 "revision": new_revision,
             },
