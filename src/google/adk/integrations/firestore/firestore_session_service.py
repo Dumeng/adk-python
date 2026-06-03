@@ -531,6 +531,7 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
             and not k.startswith(State.USER_PREFIX)
             and not k.startswith(State.TEMP_PREFIX)
         }
+        session_only_state.update(session_updates)
         transaction.update(
             session_ref,
             {
