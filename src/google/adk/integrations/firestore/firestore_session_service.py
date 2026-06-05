@@ -338,9 +338,7 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
         events=events,
         last_update_time=last_update_time,
     )
-    session._storage_update_marker = (
-        str(current_revision) if current_revision > 0 else None
-    )
+    session._storage_update_marker = str(current_revision)
     return session
 
   async def list_sessions(

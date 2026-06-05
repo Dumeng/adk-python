@@ -86,6 +86,7 @@ async def test_create_session(mock_firestore_client):
   assert session.app_name == app_name
   assert session.user_id == user_id
   assert session.id
+  assert session._storage_update_marker == "0"
 
   mock_firestore_client.collection.assert_any_call("adk-session")
   mock_firestore_client.collection.assert_any_call("app_states")
@@ -194,6 +195,7 @@ async def test_get_session_found(mock_firestore_client):
   assert session.state == {"key": "value"}
   assert len(session.events) == 1
   assert session.events[0].invocation_id == "test_inv"
+  assert session._storage_update_marker == "0"
 
 
 @pytest.mark.asyncio
