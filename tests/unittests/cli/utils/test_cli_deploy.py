@@ -31,11 +31,10 @@ from unittest import mock
 
 import click
 from click.testing import CliRunner
-from google.adk.cli import cli_deploy
-from google.adk.cli import cli_tools_click
 import pytest
 
 import src.google.adk.cli.cli_deploy as cli_deploy
+import src.google.adk.cli.cli_tools_click as cli_tools_click
 
 
 # Helpers
@@ -303,6 +302,13 @@ def test_to_agent_engine_happy_path(
   assert len(create_recorder.calls) == 1
   assert str(rmtree_recorder.get_last_call_args()[0]) == str(tmp_dir)
 
+  requirements_file = tmp_dir / "agents" / "agent" / "requirements.txt"
+  assert requirements_file.is_file()
+  assert (
+      "google-cloud-aiplatform[adk,agent_engines]"
+      in requirements_file.read_text()
+  )
+
 
 def test_to_agent_engine_raises_when_explicit_config_file_missing(
     monkeypatch: pytest.MonkeyPatch,
@@ -319,7 +325,6 @@ def test_to_agent_engine_raises_when_explicit_config_file_missing(
     cli_deploy.to_agent_engine(
         agent_folder=str(src_dir),
         temp_folder="tmp",
-        adk_app="my_adk_app",
         trace_to_cloud=True,
         project="my-gcp-project",
         region="us-central1",
@@ -381,7 +386,7 @@ def test_to_gke_happy_path(
   assert dockerfile_path.is_file()
   dockerfile_content = dockerfile_path.read_text()
   assert "CMD adk api_server --with_ui --port=9090" in dockerfile_content
-  assert "RUN pip install google-adk==1.2.0" in dockerfile_content
+  assert 'RUN pip install "google-adk[a2a]==1.2.0"' in dockerfile_content
 
   assert len(run_recorder.calls) == 3, "Expected 3 subprocess calls"
 
@@ -625,7 +630,6 @@ def test_to_agent_engine_triggers_onboarding(
 
   cli_deploy.to_agent_engine(
       agent_folder=str(src_dir),
-      adk_app="my_adk_app",
       trace_to_cloud=True,
   )
 
@@ -645,7 +649,7 @@ def test_cli_deploy_agent_engine_trigger_sources(tmp_path: Path):
   agent_dir.mkdir()
   runner = CliRunner()
   with mock.patch(
-      "google.adk.cli.cli_deploy.to_agent_engine"
+      "src.google.adk.cli.cli_deploy.to_agent_engine"
   ) as mock_to_agent_engine:
     result = runner.invoke(
         cli_tools_click.main,
@@ -669,7 +673,7 @@ def test_cli_deploy_agent_engine_artifact_service_uri(tmp_path: Path):
   agent_dir.mkdir()
   runner = CliRunner()
   with mock.patch(
-      "google.adk.cli.cli_deploy.to_agent_engine"
+      "src.google.adk.cli.cli_deploy.to_agent_engine"
   ) as mock_to_agent_engine:
     result = runner.invoke(
         cli_tools_click.main,
@@ -685,3 +689,26 @@ def test_cli_deploy_agent_engine_artifact_service_uri(tmp_path: Path):
     mock_to_agent_engine.assert_called_once()
     _, kwargs = mock_to_agent_engine.call_args
     assert kwargs["artifact_service_uri"] == "gs://my-bucket"
+
+
+def test_ensure_agent_engine_dependency(tmp_path: Path):
+  """Tests that _ensure_agent_engine_dependency appends correct extras."""
+  requirements_file = tmp_path / "requirements.txt"
+
+  # Case 1: raises FileNotFoundError when the file doesn't exist
+  with pytest.raises(FileNotFoundError):
+    cli_deploy._ensure_agent_engine_dependency(str(requirements_file))
+
+  # Case 2: appends google-cloud-aiplatform with 'adk' and 'agent_engines'
+  # extras and the versioned google-adk requirement.
+  requirements_file.write_text("")
+  cli_deploy._ensure_agent_engine_dependency(str(requirements_file))
+  content = requirements_file.read_text()
+  assert "google-cloud-aiplatform[adk,agent_engines]\n" in content
+  assert f"google-adk[a2a]=={cli_deploy.__version__}\n" in content
+
+  # Case 3: does not append duplicate if google-cloud-aiplatform already exists
+  requirements_file.write_text("google-cloud-aiplatform[adk,agent_engines]\n")
+  cli_deploy._ensure_agent_engine_dependency(str(requirements_file))
+  content = requirements_file.read_text()
+  assert content == "google-cloud-aiplatform[adk,agent_engines]\n"

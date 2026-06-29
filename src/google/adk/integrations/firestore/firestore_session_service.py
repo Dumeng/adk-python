@@ -19,12 +19,14 @@ from contextlib import asynccontextmanager
 import copy
 from datetime import datetime
 from datetime import timezone
+import json
 import logging
 import os
 from typing import Any
 from typing import AsyncGenerator
 from typing import cast
 from typing import Optional
+
 
 from ...errors.already_exists_error import AlreadyExistsError
 from ...events.event import Event
@@ -201,7 +203,7 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
         "id": session_id,
         "appName": app_name,
         "userId": user_id,
-        "state": session_state,
+        "state": json.dumps(session_state),
         "createTime": now,
         "updateTime": now,
         "revision": 0,
@@ -311,7 +313,10 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
         ed = event_data["event_data"]
         events.append(Event.model_validate(ed))
 
-    session_state = data.get("state", {})
+    raw_state = data.get("state", {})
+    session_state = (
+        json.loads(raw_state) if isinstance(raw_state, str) else raw_state
+    )
     app_state = app_doc.to_dict() if app_doc.exists else {}
     user_state = user_doc.to_dict() if user_doc.exists else {}
 
@@ -392,7 +397,12 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
     sessions = []
     for data in sessions_data:
       u_id = data["userId"]
-      s_state = data.get("state", {})
+      raw_s_state = data.get("state", {})
+      s_state = (
+          json.loads(raw_s_state)
+          if isinstance(raw_s_state, str)
+          else raw_s_state
+      )
       u_state = user_states_map.get(u_id, {})
       merged = self._merge_state(app_state, u_state, s_state)
 
@@ -533,7 +543,7 @@ class FirestoreSessionService(BaseSessionService):  # type: ignore[misc]
         transaction.update(
             session_ref,
             {
-                "state": session_only_state,
+                "state": json.dumps(session_only_state),
                 "updateTime": firestore.SERVER_TIMESTAMP,
                 "revision": new_revision,
             },

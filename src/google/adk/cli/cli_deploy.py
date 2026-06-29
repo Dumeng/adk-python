@@ -63,8 +63,8 @@ def _ensure_agent_engine_dependency(requirements_txt_path: str) -> None:
   with open(requirements_txt_path, 'a', encoding='utf-8') as f:
     if requirements and not requirements.endswith('\n'):
       f.write('\n')
-    f.write('google-cloud-aiplatform[agent_engines]\n')
-    f.write(f'google-adk=={__version__}\n')
+    f.write(f'{_AGENT_ENGINE_REQUIREMENT}\n')
+    f.write(f'google-adk[a2a]=={__version__}\n')
 
 
 _DOCKERFILE_TEMPLATE: Final[str] = """
@@ -80,14 +80,14 @@ USER myuser
 # Set up environment variables - Start
 ENV PATH="/home/myuser/.local/bin:$PATH"
 
-ENV GOOGLE_GENAI_USE_VERTEXAI=1
+ENV GOOGLE_GENAI_USE_ENTERPRISE=1
 ENV GOOGLE_CLOUD_PROJECT={gcp_project_id}
 ENV GOOGLE_CLOUD_LOCATION={gcp_region}
 
 # Set up environment variables - End
 
 # Install ADK - Start
-RUN pip install google-adk=={adk_version}
+RUN pip install "google-adk[a2a]=={adk_version}"
 # Install ADK - End
 
 # Copy agent - Start
@@ -147,6 +147,8 @@ _AGENT_ENGINE_CLASS_METHODS = [
                 'user_id': {'type': 'string'},
                 'session_id': {'type': 'string', 'nullable': True},
                 'state': {'type': 'object', 'nullable': True},
+                'ttl': {'type': 'string', 'nullable': True},
+                'expire_time': {'type': 'string', 'nullable': True},
             },
             'required': ['user_id'],
             'type': 'object',
@@ -215,19 +217,24 @@ _AGENT_ENGINE_CLASS_METHODS = [
             'Creates a new session.\n\n        Args:\n            user_id'
             ' (str):\n                Required. The ID of the user.\n          '
             '  session_id (str):\n                Optional. The ID of the'
-            ' session. If not provided, an ID\n                will be be'
+            ' session. If not provided, an ID\n                will be'
             ' generated for the session.\n            state (dict[str, Any]):\n'
             '                Optional. The initial state of the session.\n     '
-            '       **kwargs (dict[str, Any]):\n                Optional.'
-            ' Additional keyword arguments to pass to the\n               '
-            ' session service.\n\n        Returns:\n            Session: The'
-            ' newly created session instance.\n        '
+            '       ttl (str):\n                Optional. The time-to-live for'
+            ' the session.\n            expire_time (str):\n               '
+            ' Optional. The expiration time for the session.\n           '
+            ' **kwargs (dict[str, Any]):\n                Optional. Additional'
+            ' keyword arguments to pass to the\n                session'
+            ' service.\n\n        Returns:\n            Session: The newly'
+            ' created session instance.\n        '
         ),
         'parameters': {
             'properties': {
                 'user_id': {'type': 'string'},
                 'session_id': {'type': 'string', 'nullable': True},
                 'state': {'type': 'object', 'nullable': True},
+                'ttl': {'type': 'string', 'nullable': True},
+                'expire_time': {'type': 'string', 'nullable': True},
             },
             'required': ['user_id'],
             'type': 'object',
@@ -463,7 +470,7 @@ def _validate_agent_import(
 
   This pre-deployment validation catches common issues like missing
   dependencies or import errors in custom BaseLlm implementations before
-  the agent is deployed to Agent Platform. This provides clearer error
+  the agent is deployed to Agent Engine. This provides clearer error
   messages and prevents deployments that would fail at runtime.
 
   Args:
@@ -603,6 +610,34 @@ def _get_service_option_by_adk_version(
   return ' '.join(options)
 
 
+def _get_ignore_patterns_func(agent_folder: str):
+  """Returns a shutil.ignore_patterns function with combined patterns from .gitignore, .gcloudignore and .ae_ignore."""
+  patterns = set()
+
+  for filename in ['.gitignore', '.gcloudignore', '.ae_ignore']:
+    filepath = os.path.join(agent_folder, filename)
+    if os.path.exists(filepath):
+      click.echo(f'Reading ignore patterns from {filename}...')
+      try:
+        with open(filepath, 'r') as f:
+          for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+              # If it ends with /, remove it for fnmatch compatibility
+              if line.endswith('/'):
+                line = line[:-1]
+              # Strip leading / from root-anchored patterns; shutil.ignore_patterns
+              # matches basenames via fnmatch, so '/venv' would match nothing.
+              if line.startswith('/'):
+                line = line[1:]
+              if line:
+                patterns.add(line)
+      except Exception as e:
+        click.secho(f'Warning: Failed to read {filename}: {e}', fg='yellow')
+
+  return shutil.ignore_patterns(*patterns)
+
+
 def to_cloud_run(
     *,
     agent_folder: str,
@@ -679,7 +714,8 @@ def to_cloud_run(
     # copy agent source code
     click.echo('Copying agent source code...')
     agent_src_path = os.path.join(temp_folder, 'agents', app_name)
-    shutil.copytree(agent_folder, agent_src_path)
+    ignore_func = _get_ignore_patterns_func(agent_folder)
+    shutil.copytree(agent_folder, agent_src_path, ignore=ignore_func)
     requirements_txt_path = os.path.join(agent_src_path, 'requirements.txt')
     install_agent_deps = (
         f'RUN pip install -r "/app/agents/{app_name}/requirements.txt"'
@@ -853,11 +889,11 @@ def to_agent_engine(
       used.
     trace_to_cloud (bool): Deprecated. This argument is no longer required or
       used.
-    otel_to_cloud (bool): Whether to enable exporting OpenTelemetry signals
-      to Google Cloud.
-    api_key (str): Optional. The API key to use for Express Mode.
-      If not provided, the API key from the GOOGLE_API_KEY environment variable
-      will be used. It will only be used if GOOGLE_GENAI_USE_VERTEXAI is true.
+    otel_to_cloud (bool): Whether to enable exporting OpenTelemetry signals to
+      Google Cloud.
+    api_key (str): Optional. The API key to use for Express Mode. If not
+      provided, the API key from the GOOGLE_API_KEY environment variable will be
+      used. It will only be used if GOOGLE_GENAI_USE_ENTERPRISE is true.
     adk_app_object (str): Deprecated. This argument is no longer required or
       used.
     agent_engine_id (str): Optional. The ID of the Agent Runtime instance to
@@ -878,14 +914,14 @@ def to_agent_engine(
       variables. If not specified, the `.env` file in the `agent_folder` will be
       used. The values of `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`
       will be overridden by `project` and `region` if they are specified.
-    agent_engine_config_file (str): The filepath to the agent platform config file
-      to use. If not specified, the `.agent_engine_config.json` file in the
+    agent_engine_config_file (str): The filepath to the agent platform config
+      file to use. If not specified, the `.agent_engine_config.json` file in the
       `agent_folder` will be used.
     skip_agent_import_validation (bool): Deprecated. This argument is no longer
       required or used.
     trigger_sources (str): Optional. Comma-separated list of trigger sources to
-      enable (e.g., 'pubsub,eventarc'). Registers /trigger/* endpoints for
-      batch and event-driven agent invocations.
+      enable (e.g., 'pubsub,eventarc'). Registers /trigger/* endpoints for batch
+      and event-driven agent invocations.
     memory_service_uri (str): Optional. The URI of the memory service. If not
       specified, the memory service will be deployed to the same parent resource
       as the runtime.
@@ -937,28 +973,21 @@ def to_agent_engine(
   tmp_app_name = app_name + '_tmp' + datetime.now().strftime('%Y%m%d_%H%M%S')
   temp_folder = temp_folder or tmp_app_name
   agent_src_path = os.path.join(parent_folder, temp_folder, 'agents', app_name)
-  # remove agent_src_path if it exists
-  if os.path.exists(agent_src_path):
+  temp_folder_path = os.path.join(parent_folder, temp_folder)
+  if os.path.exists(temp_folder_path):
     click.echo('Removing existing files')
-    shutil.rmtree(agent_src_path)
+    shutil.rmtree(temp_folder_path)
 
   try:
-    click.echo(f'Staging all files in: {agent_src_path}')
-    ignore_patterns = None
-    ae_ignore_path = os.path.join(agent_folder, '.ae_ignore')
-    if os.path.exists(ae_ignore_path):
-      click.echo(f'Ignoring files matching the patterns in {ae_ignore_path}')
-      with open(ae_ignore_path, 'r') as f:
-        patterns = [pattern.strip() for pattern in f.readlines()]
-        ignore_patterns = shutil.ignore_patterns(*patterns)
+    ignore_func = _get_ignore_patterns_func(agent_folder)
     click.echo('Copying agent source code...')
     shutil.copytree(
         agent_folder,
         agent_src_path,
-        ignore=ignore_patterns,
+        ignore=ignore_func,
         dirs_exist_ok=True,
     )
-    os.chdir(os.path.join(parent_folder, temp_folder))
+    os.chdir(temp_folder_path)
     click.echo('Copying agent source code complete.')
 
     project = _resolve_project(project)
@@ -1017,11 +1046,12 @@ def to_agent_engine(
     if not os.path.exists(requirements_txt_path):
       click.echo(f'Creating {requirements_txt_path}...')
       with open(requirements_txt_path, 'w', encoding='utf-8') as f:
-        f.write('google-cloud-aiplatform[agent_engines]\n')
-        f.write(f'google-adk=={__version__}\n')
-        click.echo(f'Using google-adk=={__version__} in requirements')
+        f.write(f'{_AGENT_ENGINE_REQUIREMENT}\n')
+        f.write(f'google-adk[a2a]=={__version__}\n')
+        click.echo(f'Using google-adk[a2a]=={__version__} in requirements')
       click.echo(f'Created {requirements_txt_path}')
     _ensure_agent_engine_dependency(requirements_txt_path)
+
     env_vars = {}
     if not env_file:
       # Attempt to read the env variables from .env in the dir (if any).
@@ -1063,7 +1093,7 @@ def to_agent_engine(
             fg='yellow',
         )
       else:
-        env_vars['GOOGLE_GENAI_USE_VERTEXAI'] = '1'
+        env_vars['GOOGLE_GENAI_USE_ENTERPRISE'] = '1'
         env_vars['GOOGLE_API_KEY'] = api_key
     elif not project:
       if 'GOOGLE_API_KEY' in env_vars:
@@ -1302,7 +1332,8 @@ def to_gke(
     # copy agent source code
     click.echo('  - Copying agent source code...')
     agent_src_path = os.path.join(temp_folder, 'agents', app_name)
-    shutil.copytree(agent_folder, agent_src_path)
+    ignore_func = _get_ignore_patterns_func(agent_folder)
+    shutil.copytree(agent_folder, agent_src_path, ignore=ignore_func)
     requirements_txt_path = os.path.join(agent_src_path, 'requirements.txt')
     install_agent_deps = (
         f'RUN pip install -r "/app/agents/{app_name}/requirements.txt"'

@@ -44,19 +44,22 @@ from ...models.google_llm import GoogleLLMVariant
 from ...models.llm_request import LlmRequest
 from ...models.llm_response import LlmResponse
 from ...telemetry import _instrumentation
-from ...telemetry import tracing
 from ...telemetry.tracing import trace_call_llm
 from ...telemetry.tracing import trace_send_data
 from ...telemetry.tracing import tracer
 from ...tools.base_toolset import BaseToolset
 from ...tools.tool_context import ToolContext
-from ...utils import model_name_utils
 from ...utils.context_utils import Aclosing
 from .audio_cache_manager import AudioCacheManager
 from .functions import build_auth_request_event
 
 # Prefix used by toolset auth credential IDs
 TOOLSET_AUTH_CREDENTIAL_ID_PREFIX = '_adk_toolset_auth_'
+
+
+class _ReconnectSentinel(Event):
+  """Internal sentinel event to signal a silent reconnection request."""
+
 
 if TYPE_CHECKING:
   from ...agents.llm_agent import LlmAgent
@@ -385,7 +388,7 @@ async def _run_and_handle_error(
     ) as tel_ctx:
       async with Aclosing(response_generator) as agen:
         async for llm_response in agen:
-          tel_ctx.record_llm_response(llm_response)
+          tel_ctx.record_llm_response(invocation_context, llm_response)
           yield llm_response
   except Exception as model_error:
     callback_context = CallbackContext(
@@ -434,8 +437,8 @@ async def _process_agent_tools(
   names to ``BaseTool`` instances ready for function call dispatch.
 
   Args:
-    invocation_context: The invocation context (``agent`` is read
-      from ``invocation_context.agent``).
+    invocation_context: The invocation context (``agent`` is read from
+      ``invocation_context.agent``).
     llm_request: The LLM request to populate with tool declarations.
   """
   agent = invocation_context.agent
@@ -480,6 +483,29 @@ async def _process_agent_tools(
       await tool.process_llm_request(
           tool_context=tool_context, llm_request=llm_request
       )
+
+  if invocation_context.live_request_queue is not None:
+    _mark_live_async_tools_non_blocking(llm_request)
+
+
+def _mark_live_async_tools_non_blocking(llm_request: LlmRequest) -> None:
+  """Marks live streaming and response-scheduling tools as NON_BLOCKING.
+
+  These tools emit asynchronous FunctionResponses, which the Live API only
+  accepts for NON_BLOCKING declarations.
+  """
+  if not llm_request.config.tools:
+    return
+  for gemini_tool in llm_request.config.tools:
+    for declaration in gemini_tool.function_declarations or []:
+      tool = llm_request.tools_dict.get(declaration.name)
+      if tool is None:
+        continue
+      is_streaming_tool = hasattr(tool, 'func') and inspect.isasyncgenfunction(
+          tool.func
+      )
+      if tool.response_scheduling is not None or is_streaming_tool:
+        declaration.behavior = types.Behavior.NON_BLOCKING
 
 
 class BaseLlmFlow(ABC):
@@ -580,6 +606,9 @@ class BaseLlmFlow(ABC):
             invocation_context.agent.name,
         )
         async with llm.connect(llm_request) as llm_connection:
+          # Reset retry count to allow the maximum reconnect attempts for
+          # subsequent connection drops.
+          attempt = 1
           # Skip sending history if we are resuming a session. The server
           # already has the state associated with the resumption handle.
           if (
@@ -599,6 +628,7 @@ class BaseLlmFlow(ABC):
               self._send_to_model(llm_connection, invocation_context)
           )
 
+          should_reconnect = False
           try:
             async with Aclosing(
                 self._receive_from_model(
@@ -609,8 +639,9 @@ class BaseLlmFlow(ABC):
                 )
             ) as agen:
               async for event in agen:
-                # Reset attempt counter on successful communication.
-                attempt = 1
+                if isinstance(event, _ReconnectSentinel):
+                  should_reconnect = True
+                  break
                 # Empty event means the queue is closed.
                 if not event:
                   break
@@ -691,6 +722,9 @@ class BaseLlmFlow(ABC):
               await send_task
             except asyncio.CancelledError:
               pass
+        if should_reconnect:
+          continue
+        break
       except (ConnectionClosed, ConnectionClosedOK) as e:
         # If we have a session resumption handle, we attempt to reconnect.
         # This handle is updated dynamically during the session.
@@ -705,9 +739,9 @@ class BaseLlmFlow(ABC):
         logger.error('Connection closed: %s.', e)
         raise
       except errors.APIError as e:
-        # Error code 1000 and 1006 indicates a recoverable connection drop.
+        # Error code 1000, 1006 and 1011 indicates a recoverable connection drop.
         # In that case, we attempt to reconnect with session handle if available.
-        if e.code in [1000, 1006]:
+        if e.code in [1000, 1006, 1011]:
           if invocation_context.live_session_resumption_handle:
             if attempt > DEFAULT_MAX_RECONNECT_ATTEMPTS:
               logger.error('Max reconnection attempts reached (%s).', e)
@@ -716,6 +750,7 @@ class BaseLlmFlow(ABC):
                 'Connection lost (%s), reconnecting with session handle.', e
             )
             continue
+
         logger.error('APIError in live flow: %s', e)
         raise
       except Exception as e:
@@ -829,9 +864,9 @@ class BaseLlmFlow(ABC):
           if llm_response.go_away:
             logger.info(f'Received go away signal: {llm_response.go_away}')
             # The server signals that it will close the connection soon.
-            # We proactively raise ConnectionClosed to trigger the reconnection
-            # logic in run_live, which will use the latest session handle.
-            raise ConnectionClosed(None, None)
+            # We yield a sentinel event to request reconnection internally.
+            yield _ReconnectSentinel()
+            return
 
           model_response_event = Event(
               id=Event.new_id(),
@@ -1198,6 +1233,9 @@ class BaseLlmFlow(ABC):
       if auth_event:
         yield auth_event
 
+        # Interrupt invocation (mirrors _resolve_toolset_auth behavior)
+        invocation_context.end_invocation = True
+
       tool_confirmation_event = functions.generate_request_confirmation_event(
           invocation_context, function_call_event, function_response_event
       )
@@ -1243,6 +1281,16 @@ class BaseLlmFlow(ABC):
     agent_to_run = root_agent.find_agent(agent_name)
     if not agent_to_run:
       raise ValueError(f'Agent {agent_name} not found in the agent tree.')
+
+    from google.adk.agents.llm_agent import LlmAgent
+
+    if (
+        isinstance(invocation_context.agent, LlmAgent)
+        and invocation_context.agent.disallow_transfer_to_peers
+        and agent_to_run.parent_agent == invocation_context.agent.parent_agent
+        and agent_to_run != invocation_context.agent
+    ):
+      raise ValueError(f'Transfer to sibling agent {agent_name} is disallowed.')
     return agent_to_run
 
   async def _call_llm_async(
